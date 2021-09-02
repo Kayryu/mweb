@@ -1,8 +1,29 @@
 use http::{Method, Request, Response, Version};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::io::{Read, Write};
 use std::net::{TcpListener};
 use std::str;
+
+
+fn header_flat<T>(res: &Response<T>) -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    let status = res.status();
+    let s = format!(
+        "HTTP/1.1 {} {}\r\n",
+        status.as_str(),
+        status.canonical_reason().unwrap_or("Unsupported Status")
+    );
+    data.extend_from_slice(&s.as_bytes());
+    for (key, value) in res.headers().iter() {
+        data.extend_from_slice(key.as_str().as_bytes());
+        data.extend_from_slice(b": ");
+        data.extend_from_slice(value.as_bytes());
+        data.extend_from_slice(b"\r\n");
+    }
+
+    data.extend_from_slice(b"\r\n");
+    data
+}
 
 trait Flat {
     fn flat(&self) -> Vec<u8>;
@@ -13,22 +34,7 @@ where
     T: AsRef<[u8]>,
 {
     fn flat(&self) -> Vec<u8> {
-        let mut data: Vec<u8> = Vec::new();
-        let status = self.status();
-        let s = format!(
-            "HTTP/1.1 {} {}\r\n",
-            status.as_str(),
-            status.canonical_reason().unwrap_or("Unsupported Status")
-        );
-        data.extend_from_slice(&s.as_bytes());
-        for (key, value) in self.headers().iter() {
-            data.extend_from_slice(key.as_str().as_bytes());
-            data.extend_from_slice(b": ");
-            data.extend_from_slice(value.as_bytes());
-            data.extend_from_slice(b"\r\n");
-        }
-
-        data.extend_from_slice(b"\r\n");
+        let mut data = header_flat(&self);
         data.extend_from_slice(self.body().as_ref());
         return data;
     }
@@ -37,7 +43,8 @@ where
 const NOT_FOUND: &[u8] = b"html";
 
 trait ResponseExt<T> {
-    fn e404() -> Response<()>;
+    fn e100(data: T) -> Self;
+    fn e404(data: T) -> Self;
     fn json(data: T) -> Self;
     fn html(content: T) -> Self;
 }
@@ -46,10 +53,18 @@ impl<T> ResponseExt<T> for Response<T>
 where
     T: AsRef<[u8]>,
 {
-    fn e404() -> Response<()> {
+    fn e100(e: T) -> Self {
+        let response = Response::builder()
+            .status(100)
+            .body(e)
+            .unwrap();
+        return response;
+    }
+
+    fn e404(e: T) -> Self {
         let response = Response::builder()
             .status(404)
-            .body(())
+            .body(e)
             .unwrap();
         return response;
     }
@@ -118,7 +133,7 @@ impl WebServer {
         WebServer { handler }
     }
 
-    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<Request<Vec<u8>>, ()> {
+    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<(Request<Vec<u8>>, bool), ()> {
         let mut headers = [httparse::EMPTY_HEADER; 16];
         let mut parse_req = httparse::Request::new(&mut headers);
 
@@ -133,6 +148,15 @@ impl WebServer {
                     content_length = usize::from_str_radix(str::from_utf8(h.value).unwrap(), 10).ok();
                 }
                 
+                // true if the client sent a `Expect: 100-continue` header
+                let expects_continue: bool = match parse_req.headers.iter()
+                .find(|h| h.name.to_lowercase() == "expect") {
+                    Some(header) => {
+                        str::from_utf8(header.value).unwrap().to_lowercase() == "100-continue"
+                    },
+                    None => false
+                };
+
                 // copy to http:Request
                 let mut rb = Request::builder()
                     .method(parse_req.method.unwrap())
@@ -145,15 +169,23 @@ impl WebServer {
                 let (_headers, mut body) = plaintext.split_at(parsed_len);
 
                 if let Some(len) = content_length {
-                    let (b, _) = body.split_at(len);
-                    body = b;
+                    if !expects_continue {
+                        let (b, _) = body.split_at(len);
+                        body = b;
+                    } else {
+                        let (a, _) = body.split_at(0);
+                        body = a;
+                    }
                 }
                 debug!("body {}", str::from_utf8(body).unwrap());
 
                 let response = rb.body(body.to_vec()).unwrap();
-                return Ok(response);
+                return Ok((response, expects_continue));
             }
-            Ok(httparse::Status::Partial) => return Ok(Request::default()),
+            Ok(httparse::Status::Partial) => {
+                warn!("httparse Status in Partial");
+                return Ok((Request::default(), false))
+            },
             Err(e) => {
                 error!("e : {}", e.to_string());
                 return Err(());
@@ -170,13 +202,17 @@ impl WebServer {
 
                     let mut plaintext = [0u8; 1024]; //Vec::new();
                     match socket.read(&mut plaintext) {
-                        Ok(_) => {
-                            let request = self.parse(&plaintext.to_vec()).unwrap();
+                        Ok(len) => {
+                            debug!("receive data length: {}", len);
+                            let (request, expects) = self.parse(&plaintext.to_vec()).unwrap();
                             debug!("request :{:?}", request);
 
-                            let response = self.handler.process(request);
+                            let data = if !expects {
+                                self.handler.process(request).flat()
+                            } else {
+                                Response::e100(Vec::new()).flat()
+                            };
 
-                            let data = response.flat();
                             // response to vec.
                             socket.write(&data).unwrap();
                         }

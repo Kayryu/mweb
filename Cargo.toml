@@ -1,5 +1,5 @@
 [package]
-name = "tweb"
+name = "mweb"
 version = "0.1.0"
 edition = "2018"
 
@@ -10,3 +10,5 @@ http="*"
 httparse="*"
 log="*"
 env_logger="*"
+rustls = "*"
+bytes = "*"

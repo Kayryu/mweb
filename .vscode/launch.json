@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'mjrpc'",
+            "name": "Debug executable 'mweb'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=mjrpc",
-                    "--package=mjrpc"
+                    "--bin=mweb",
+                    "--package=mweb"
                 ],
                 "filter": {
-                    "name": "mjrpc",
+                    "name": "mweb",
                     "kind": "bin"
                 }
             },
@@ -25,16 +25,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'mjrpc'",
+            "name": "Debug unit tests in executable 'mweb'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=mjrpc",
-                    "--package=mjrpc"
+                    "--bin=mweb",
+                    "--package=mweb"
                 ],
                 "filter": {
-                    "name": "mjrpc",
+                    "name": "mweb",
                     "kind": "bin"
                 }
             },
