@@ -1,9 +1,8 @@
 use http::{Method, Request, Response, Version};
 use log::{debug, error, info, warn};
 use std::io::{Read, Write};
-use std::net::{TcpListener};
+use std::net::TcpListener;
 use std::str;
-
 
 fn header_flat<T>(res: &Response<T>) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
@@ -54,25 +53,20 @@ where
     T: AsRef<[u8]>,
 {
     fn e100(e: T) -> Self {
-        let response = Response::builder()
-            .status(100)
-            .body(e)
-            .unwrap();
+        let response = Response::builder().status(100).body(e).unwrap();
         return response;
     }
 
     fn e404(e: T) -> Self {
-        let response = Response::builder()
-            .status(404)
-            .body(e)
-            .unwrap();
+        let response = Response::builder().status(404).body(e).unwrap();
         return response;
     }
     fn json(content: T) -> Self {
         let response = Response::builder()
             .status(200)
-            .header("connection", "close")
-            .header("content-type", "application/json; charset=utf-8")
+            .version(Version::HTTP_11)
+            // .header("connection", "close")
+            .header("content-type", "application/json")
             .header("content-length", content.as_ref().len())
             .body(content)
             .unwrap();
@@ -82,13 +76,12 @@ where
     fn html(content: T) -> Self {
         let response = Response::builder()
             .status(200)
-            .header("connection", "close")
             .header("content-type", "text/html; charset=utf-8")
             .header("content-length", content.as_ref().len())
             .body(content)
             .unwrap();
         return response;
-    } 
+    }
 }
 
 pub struct Handler {}
@@ -103,6 +96,7 @@ impl Handler {
                         // response
                         let message = b"hello world from server\r\n";
                         let response: Response<Vec<u8>> = Response::json(message.to_vec());
+                        debug!("response :{:?}", response);
                         return response;
                     }
                     _ => {
@@ -133,7 +127,7 @@ impl WebServer {
         WebServer { handler }
     }
 
-    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<(Request<Vec<u8>>, bool), ()> {
+    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<(Request<Vec<u8>>, bool, usize), ()> {
         let mut headers = [httparse::EMPTY_HEADER; 16];
         let mut parse_req = httparse::Request::new(&mut headers);
 
@@ -143,18 +137,25 @@ impl WebServer {
 
                 // content-type | content-length
                 let mut content_length = None;
-                let header = parse_req.headers.iter().find(|h| h.name.to_lowercase() == "content-length");
+                let header = parse_req
+                    .headers
+                    .iter()
+                    .find(|h| h.name.to_lowercase() == "content-length");
                 if let Some(&h) = header {
-                    content_length = usize::from_str_radix(str::from_utf8(h.value).unwrap(), 10).ok();
+                    content_length =
+                        usize::from_str_radix(str::from_utf8(h.value).unwrap(), 10).ok();
                 }
-                
+
                 // true if the client sent a `Expect: 100-continue` header
-                let expects_continue: bool = match parse_req.headers.iter()
-                .find(|h| h.name.to_lowercase() == "expect") {
+                let expects_continue: bool = match parse_req
+                    .headers
+                    .iter()
+                    .find(|h| h.name.to_lowercase() == "expect")
+                {
                     Some(header) => {
                         str::from_utf8(header.value).unwrap().to_lowercase() == "100-continue"
-                    },
-                    None => false
+                    }
+                    None => false,
                 };
 
                 // copy to http:Request
@@ -166,8 +167,9 @@ impl WebServer {
                 for header in parse_req.headers {
                     rb = rb.header(header.name.clone(), header.value.clone());
                 }
-                let (_headers, mut body) = plaintext.split_at(parsed_len);
 
+                // find pos of body
+                let (_headers, mut body) = plaintext.split_at(parsed_len);
                 if let Some(len) = content_length {
                     if !expects_continue {
                         let (b, _) = body.split_at(len);
@@ -180,12 +182,12 @@ impl WebServer {
                 debug!("body {}", str::from_utf8(body).unwrap());
 
                 let response = rb.body(body.to_vec()).unwrap();
-                return Ok((response, expects_continue));
+                return Ok((response, expects_continue, content_length.unwrap_or_default()));
             }
             Ok(httparse::Status::Partial) => {
                 warn!("httparse Status in Partial");
-                return Ok((Request::default(), false))
-            },
+                return Ok((Request::default(), false, 0));
+            }
             Err(e) => {
                 error!("e : {}", e.to_string());
                 return Err(());
@@ -200,19 +202,23 @@ impl WebServer {
                 Ok((mut socket, addr)) => {
                     info!("new client from {:?}", addr);
 
-                    let mut plaintext = [0u8; 1024]; //Vec::new();
+                    let mut plaintext = [0u8; 2048]; //Vec::new();
                     match socket.read(&mut plaintext) {
                         Ok(len) => {
                             debug!("receive data length: {}", len);
-                            let (request, expects) = self.parse(&plaintext.to_vec()).unwrap();
+                            let (mut request, expects, content_len) = self.parse(&plaintext.to_vec()).unwrap();
+                            if expects {
+                                let data = Response::e100(Vec::new()).flat();
+                                // response to continue.
+                                socket.write(&data).unwrap();
+                                // read all data;
+                                let mut body = vec![0u8; content_len+10];
+                                socket.read(&mut body).unwrap();
+                                let (parts, _) = request.into_parts();
+                                request = Request::from_parts(parts, body);
+                            }
                             debug!("request :{:?}", request);
-
-                            let data = if !expects {
-                                self.handler.process(request).flat()
-                            } else {
-                                Response::e100(Vec::new()).flat()
-                            };
-
+                            let data = self.handler.process(request).flat();
                             // response to vec.
                             socket.write(&data).unwrap();
                         }
