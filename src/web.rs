@@ -34,29 +34,49 @@ where
     }
 }
 
-trait Wrapper<T> {
+const NOT_FOUND: &[u8] = b"html";
+
+trait ResponseExt<T> {
+    fn e404() -> Response<()>;
     fn json(data: T) -> Self;
+    fn html(content: T) -> Self;
 }
 
-impl<T> Wrapper<T> for Response<T>
+impl<T> ResponseExt<T> for Response<T>
 where
     T: AsRef<[u8]>,
 {
-    fn json(data: T) -> Self {
+    fn e404() -> Response<()> {
         let response = Response::builder()
-            .header("Connection", "close")
-            .status(200)
-            .header("content-type", "application/json")
-            .header("content-length", data.as_ref().len())
-            .body(data)
+            .status(404)
+            .body(())
             .unwrap();
         return response;
     }
+    fn json(content: T) -> Self {
+        let response = Response::builder()
+            .status(200)
+            .header("connection", "close")
+            .header("content-type", "application/json; charset=utf-8")
+            .header("content-length", content.as_ref().len())
+            .body(content)
+            .unwrap();
+        return response;
+    }
+
+    fn html(content: T) -> Self {
+        let response = Response::builder()
+            .status(200)
+            .header("connection", "close")
+            .header("content-type", "text/html; charset=utf-8")
+            .header("content-length", content.as_ref().len())
+            .body(content)
+            .unwrap();
+        return response;
+    } 
 }
 
 pub struct Handler {}
-
-const NOT_FOUND: &[u8] = b"html";
 
 impl Handler {
     pub fn process(&self, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -67,10 +87,7 @@ impl Handler {
                     "/command" => {
                         // response
                         let message = b"hello world from server\r\n";
-                        let response: Response<Vec<u8>> = Response::builder()
-                            .header("Connection", "close")
-                            .body(message.to_vec())
-                            .unwrap();
+                        let response: Response<Vec<u8>> = Response::json(message.to_vec());
                         return response;
                     }
                     _ => {
@@ -82,6 +99,7 @@ impl Handler {
                 }
             }
             _ => {
+                error!("No matching routes for {} {}", req.method(), req.uri());
                 return Response::builder()
                     .status(404)
                     .body(NOT_FOUND.to_vec())
@@ -109,7 +127,12 @@ impl WebServer {
                 debug!("Request.parse Complete({})", parsed_len);
 
                 // content-type | content-length
-
+                let mut content_length = None;
+                let header = parse_req.headers.iter().find(|h| h.name.to_lowercase() == "content-length");
+                if let Some(&h) = header {
+                    content_length = usize::from_str_radix(str::from_utf8(h.value).unwrap(), 10).ok();
+                }
+                
                 // copy to http:Request
                 let mut rb = Request::builder()
                     .method(parse_req.method.unwrap())
@@ -119,9 +142,14 @@ impl WebServer {
                 for header in parse_req.headers {
                     rb = rb.header(header.name.clone(), header.value.clone());
                 }
-                let (_headers, body) = plaintext.split_at(parsed_len);
+                let (_headers, mut body) = plaintext.split_at(parsed_len);
 
+                if let Some(len) = content_length {
+                    let (b, _) = body.split_at(len);
+                    body = b;
+                }
                 debug!("body {}", str::from_utf8(body).unwrap());
+
                 let response = rb.body(body.to_vec()).unwrap();
                 return Ok(response);
             }

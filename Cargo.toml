@@ -1,5 +1,5 @@
 [package]
-name = "mjrpc"
+name = "tweb"
 version = "0.1.0"
 edition = "2018"
 
@@ -9,3 +9,4 @@ edition = "2018"
 http="*"
 httparse="*"
 log="*"
+env_logger="*"
