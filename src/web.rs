@@ -1,8 +1,10 @@
 use http::{Method, Request, Response, Version};
-use log::{debug, error, info, warn};
-use std::io::{Read, Write};
+use log::{debug, error, info, warn, trace};
+use std::io::{Read, Write, BufReader};
 use std::net::TcpListener;
 use std::str;
+use std::sync::Arc;
+use std::fs;
 
 fn header_flat<T>(res: &Response<T>) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
@@ -195,29 +197,73 @@ impl WebServer {
         };
     }
 
+    pub fn load_certs(filename: &str) -> Vec<rustls::Certificate> {
+        let certfile = fs::File::open(filename).expect("cannot open certificate file");
+        let mut reader = BufReader::new(certfile);
+        rustls::internal::pemfile::certs(&mut reader).unwrap()
+    }
+
+    pub fn load_private_key(filename: &str) -> rustls::PrivateKey {
+        let rsa_keys = {
+            let keyfile = fs::File::open(filename)
+                .expect("cannot open private key file");
+            let mut reader = BufReader::new(keyfile);
+            rustls::internal::pemfile::rsa_private_keys(&mut reader)
+                .expect("file contains invalid rsa private key")
+        };
+    
+        let pkcs8_keys = {
+            let keyfile = fs::File::open(filename)
+                .expect("cannot open private key file");
+            let mut reader = BufReader::new(keyfile);
+            rustls::internal::pemfile::pkcs8_private_keys(&mut reader)
+                .expect("file contains invalid pkcs8 private key (encrypted keys not supported)")
+        };
+    
+        // prefer to load pkcs8 keys
+        if !pkcs8_keys.is_empty() {
+            pkcs8_keys[0].clone()
+        } else {
+            assert!(!rsa_keys.is_empty());
+            rsa_keys[0].clone()
+        }
+    }
+
     pub fn launch(&self) {
         let listener = TcpListener::bind("0.0.0.0:8443").unwrap();
+
+        let mut cfg = rustls::ServerConfig::new(rustls::NoClientAuth::new());
+        let certs = WebServer::load_certs("rsa_sha256_cert.pem");
+        let privkey = WebServer::load_private_key("rsa_sha256_key.pem");
+
+        cfg.set_single_cert_with_ocsp_and_sct(certs, privkey, vec![], vec![]).unwrap();
+        let a_cfg = Arc::new(cfg);
+
         loop {
             match listener.accept() {
                 Ok((mut socket, addr)) => {
                     info!("new client from {:?}", addr);
+
+                    // add tls here.
+                    let mut session = rustls::ServerSession::new(&a_cfg);
+                    let mut socket = rustls::Stream::new(&mut session, &mut socket);
 
                     let mut plaintext = [0u8; 2048]; //Vec::new();
                     match socket.read(&mut plaintext) {
                         Ok(len) => {
                             debug!("receive data length: {}", len);
                             let (mut request, expects, content_len) = self.parse(&plaintext.to_vec()).unwrap();
-                            if expects {
+                            if expects || len < content_len {
                                 let data = Response::e100(Vec::new()).flat();
                                 // response to continue.
                                 socket.write(&data).unwrap();
                                 // read all data;
-                                let mut body = vec![0u8; content_len+10];
+                                let mut body = vec![0u8; content_len];
                                 socket.read(&mut body).unwrap();
                                 let (parts, _) = request.into_parts();
                                 request = Request::from_parts(parts, body);
                             }
-                            debug!("request :{:?}", request);
+                            trace!("request :{:?}", request);
                             let data = self.handler.process(request).flat();
                             // response to vec.
                             socket.write(&data).unwrap();
