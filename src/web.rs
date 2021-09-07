@@ -1,5 +1,6 @@
 use http::{Method, Request, Response, Version};
 use log::{debug, error, info, warn, trace};
+use rustls::ServerConfig;
 use std::io::{Read, Write, BufReader};
 use std::net::TcpListener;
 use std::str;
@@ -229,15 +230,19 @@ impl WebServer {
         }
     }
 
-    pub fn launch(&self) {
-        let listener = TcpListener::bind("0.0.0.0:8443").unwrap();
-
+    pub fn make_config(&self) -> Arc<ServerConfig> {
         let mut cfg = rustls::ServerConfig::new(rustls::NoClientAuth::new());
         let certs = WebServer::load_certs("rsa_sha256_cert.pem");
         let privkey = WebServer::load_private_key("rsa_sha256_key.pem");
-
         cfg.set_single_cert_with_ocsp_and_sct(certs, privkey, vec![], vec![]).unwrap();
         let a_cfg = Arc::new(cfg);
+        a_cfg
+    }    
+
+    pub fn launch(&self) {
+        let listener = TcpListener::bind("0.0.0.0:8443").unwrap();
+
+        let cfg = self.make_config();
 
         loop {
             match listener.accept() {
@@ -245,7 +250,7 @@ impl WebServer {
                     info!("new client from {:?}", addr);
 
                     // add tls here.
-                    let mut session = rustls::ServerSession::new(&a_cfg);
+                    let mut session = rustls::ServerSession::new(&cfg);
                     let mut socket = rustls::Stream::new(&mut session, &mut socket);
 
                     let mut plaintext = [0u8; 2048]; //Vec::new();
