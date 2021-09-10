@@ -113,8 +113,8 @@ impl Handler {
             _ => {
                 error!("No matching routes for {} {}", req.method(), req.uri());
                 return Response::builder()
-                    .status(404)
-                    .body(NOT_FOUND.to_vec())
+                    .status(200)
+                    .body(b"Hello mweb".to_vec())
                     .unwrap();
             }
         };
@@ -130,7 +130,7 @@ impl WebServer {
         WebServer { handler }
     }
 
-    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<(Request<Vec<u8>>, bool, usize), ()> {
+    pub fn parse(&self, plaintext: &Vec<u8>) -> Result<(Request<Vec<u8>>, bool, usize), String> {
         let mut headers = [httparse::EMPTY_HEADER; 16];
         let mut parse_req = httparse::Request::new(&mut headers);
 
@@ -193,7 +193,7 @@ impl WebServer {
             }
             Err(e) => {
                 error!("e : {}", e.to_string());
-                return Err(());
+                return Err(e.to_string());
             }
         };
     }
@@ -232,6 +232,9 @@ impl WebServer {
 
     pub fn make_config(&self) -> Arc<ServerConfig> {
         let mut cfg = rustls::ServerConfig::new(rustls::NoClientAuth::new());
+        let mut versions = Vec::new();
+        versions.push(rustls::ProtocolVersion::TLSv1_2);
+        cfg.versions = versions;
         let certs = WebServer::load_certs("rsa_sha256_cert.pem");
         let privkey = WebServer::load_private_key("rsa_sha256_key.pem");
         cfg.set_single_cert_with_ocsp_and_sct(certs, privkey, vec![], vec![]).unwrap();
@@ -257,19 +260,25 @@ impl WebServer {
                     match socket.read(&mut plaintext) {
                         Ok(len) => {
                             debug!("receive data length: {}", len);
-                            let (mut request, expects, content_len) = self.parse(&plaintext.to_vec()).unwrap();
-                            if expects || len < content_len {
-                                let data = Response::e100(Vec::new()).flat();
-                                // response to continue.
-                                socket.write(&data).unwrap();
-                                // read all data;
-                                let mut body = vec![0u8; content_len];
-                                socket.read(&mut body).unwrap();
-                                let (parts, _) = request.into_parts();
-                                request = Request::from_parts(parts, body);
-                            }
-                            trace!("request :{:?}", request);
-                            let data = self.handler.process(request).flat();
+                            let data = match self.parse(&plaintext.to_vec()) {
+                                Ok((mut request, expects, content_len)) => {
+                                    if expects || len < content_len {
+                                        let data = Response::e100(Vec::new()).flat();
+                                        // response to continue.
+                                        socket.write(&data).unwrap();
+                                        // read all data;
+                                        let mut body = vec![0u8; content_len];
+                                        socket.read(&mut body).unwrap();
+                                        let (parts, _) = request.into_parts();
+                                        request = Request::from_parts(parts, body);
+                                    }
+                                    trace!("request :{:?}", request);
+                                    self.handler.process(request).flat()
+                                },
+                                Err(e) => {
+                                    e.as_bytes().to_vec()
+                                }
+                            };
                             // response to vec.
                             socket.write(&data).unwrap();
                         }
